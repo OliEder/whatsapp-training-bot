@@ -1,7 +1,7 @@
 const express = require('express');
 const path = require('path');
 const { initDb } = require('./db');
-const { initWhatsApp } = require('./whatsapp');
+const { initWhatsApp, getStatus, getQr, getGruppen } = require('./whatsapp');
 const { startScheduler } = require('./scheduler');
 const teamsRouter = require('./api/teams');
 const kinderRouter = require('./api/kinder');
@@ -17,12 +17,10 @@ app.use('/api/teams', kinderRouter);
 app.use('/api/teams', teilnahmeRouter);
 
 app.get('/api/whatsapp/status', (req, res) => {
-  const { getStatus, getQr } = require('./whatsapp');
   res.json({ status: getStatus(), qr: getQr() });
 });
 
 app.get('/api/whatsapp/gruppen', async (req, res) => {
-  const { getGruppen } = require('./whatsapp');
   try {
     const gruppen = await getGruppen();
     res.json(gruppen);
