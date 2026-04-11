@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WhatsApp Training-Bot</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <nav>
+    <h1>🏀 Training-Bot</h1>
+    <button onclick="showTab('teams')" id="btn-teams" class="active">Teams</button>
+    <button onclick="showTab('kinder')" id="btn-kinder">Kinder</button>
+    <button onclick="showTab('ergebnisse')" id="btn-ergebnisse">Ergebnisse</button>
+    <button onclick="showTab('whatsapp')" id="btn-whatsapp">WhatsApp</button>
+  </nav>
+  <div class="container">
+    <div id="tab-teams">
+      <div class="card">
+        <h2>Teams</h2>
+        <div id="teams-liste"></div>
+        <br>
+        <button class="primary" onclick="showTeamForm()">+ Team hinzufügen</button>
+      </div>
+      <div class="card hidden" id="team-form-card">
+        <h2 id="team-form-titel">Neues Team</h2>
+        <input id="f-name" placeholder="Teamname (z.B. U10)" />
+        <input id="f-training-url" placeholder="Training ICS-URL (webcal://...)" />
+        <input id="f-training-filter" placeholder="Training-Filter (z.B. 'U10 Training')" />
+        <input id="f-spiele-url" placeholder="Spiele ICS-URL" />
+        <input id="f-spiele-filter" placeholder="Spiele-Filter (leer = kein Filter)" />
+        <input id="f-tage-training" placeholder="Tage vor Training für Poll" type="number" value="3" />
+        <input id="f-tage-spiel-poll" placeholder="Tage vor Spiel für Poll" type="number" value="5" />
+        <input id="f-tage-spiel-event" placeholder="Tage vor Spiel für Event" type="number" value="14" />
+        <input id="f-trainer-nummer" placeholder="Trainer-Nummer (+49...)" />
+        <button class="primary" onclick="saveTeam()">Speichern</button>
+        <button class="secondary" onclick="hideTeamForm()">Abbrechen</button>
+      </div>
+    </div>
+    <div id="tab-kinder" class="hidden">
+      <div class="card">
+        <h2>Kinder verwalten</h2>
+        <select id="kinder-team-select" onchange="loadKinder()"></select>
+        <div id="kinder-liste"></div>
+        <br>
+        <input id="neues-kind" placeholder="Name des Kindes" style="width:auto" />
+        <button class="primary" onclick="addKind()">Hinzufügen</button>
+        <br><br>
+        <label>CSV-Import: <input type="file" id="csv-import" accept=".csv" onchange="importCsv()" /></label>
+      </div>
+    </div>
+    <div id="tab-ergebnisse" class="hidden">
+      <div class="card">
+        <h2>Ergebnisse & CSV-Download</h2>
+        <select id="ergebnisse-team-select" onchange="loadErgebnisse()"></select>
+        <div id="ergebnisse-liste"></div>
+      </div>
+    </div>
+    <div id="tab-whatsapp" class="hidden">
+      <div class="card">
+        <h2>WhatsApp Status</h2>
+        <p id="wa-status-text"></p>
+        <div id="qr-container" class="hidden">
+          <p>QR-Code mit WhatsApp scannen:</p>
+          <canvas id="qr-canvas"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
