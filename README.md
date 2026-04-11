@@ -2,6 +2,8 @@
 
 Home Assistant Add-on für automatische WhatsApp-Polls bei Trainings und Spielen.
 
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-☕-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/olivermarcus.eder)
+
 ## Installation
 
 1. HA → Einstellungen → Add-ons → Add-on Store → ⋮ → Repositories
