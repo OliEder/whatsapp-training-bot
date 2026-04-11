@@ -1,0 +1,561 @@
+= WhatsApp Training-Bot — arc42 Architekturdokumentation
+Oliver Marcus Eder
+v1.0.0, 2026-04-11
+:toc: left
+:toc-title: Inhaltsverzeichnis
+:toclevels: 3
+:sectnums:
+:icons: font
+:source-highlighter: highlight.js
+:imagesdir: images
+
+// GitHub rendert Mermaid-Diagramme nativ in .adoc-Dateien nicht —
+// daher werden alle Diagramme als Mermaid-Codeblöcke in Markdown-Style
+// eingebettet (GitHub rendert diese in .md, aber nicht in .adoc).
+// Als pragmatische Lösung: Diagramme als separate .md-Dateien verlinkt.
+
+== 1. Einführung und Ziele
+
+=== 1.1 Aufgabenstellung
+
+Ein Jugend-Basketball-Trainer betreut mehrere Teams (U8, U10, ...). Vor jedem Training und Spiel müssen manuell WhatsApp-Umfragen erstellt werden, um die Teilnahme abzufragen. Dieser Bot automatisiert genau das:
+
+* Liest Kalender-Feeds (ICS/iCal) für Trainings und Spiele
+* Sendet automatisch WhatsApp-Polls zum konfigurierten Zeitpunkt
+* Erstellt Gruppenevents für Spielankündigungen
+* Exportiert Teilnahmelisten als CSV
+
+=== 1.2 Qualitätsziele
+
+[cols="1,3,3"]
+|===
+|Priorität |Qualitätsziel |Szenario
+
+|1 |*Zuverlässigkeit* |Polls werden genau einmal gesendet, auch bei Neustarts
+|2 |*Einfache Bedienung* |Einrichtung per Web-UI, kein Coding nötig
+|3 |*Datenpersistenz* |WhatsApp-Session und Konfiguration überleben HA-Neustarts
+|4 |*Erweiterbarkeit* |REST-API für spätere Trainer-App-Integration
+|===
+
+=== 1.3 Stakeholder
+
+[cols="1,2,3"]
+|===
+|Rolle |Name/Beschreibung |Erwartungen
+
+|Trainer |Primärnutzer |Polls automatisch, ohne manuellen Aufwand
+|Eltern |WhatsApp-Gruppenempfänger |Klare, rechtzeitige Umfragen
+|Entwickler |Zukünftige Trainer-App |Saubere REST-API
+|===
+
+== 2. Randbedingungen
+
+=== 2.1 Technische Randbedingungen
+
+[cols="1,3"]
+|===
+|Randbedingung |Begründung
+
+|WhatsApp (kein Telegram) |Alle Eltern-Gruppen sind dort, kein Wechsel möglich
+|Home Assistant Add-on |Läuft 24/7 ohne eigenen Server, kostenlos
+|Kein WhatsApp Business API |Keine laufenden Kosten, inoffiziell via Browser-Automation
+|Node.js 20 |Kompatibel mit whatsapp-web.js
+|===
+
+=== 2.2 Organisatorische Randbedingungen
+
+* Kein Cloud-Dienst (Datenschutz, keine laufenden Kosten)
+* Bedienung durch nicht-technische Nutzer
+* Kalender werden in Apple iCal/iCloud gepflegt
+
+== 3. Kontextabgrenzung
+
+=== 3.1 Fachlicher Kontext
+
+[source,mermaid]
+----
+graph TB
+    Trainer["👨‍💼 Trainer\n(Web-UI)"]
+    Bot["🤖 WhatsApp\nTraining-Bot"]
+    WA["📱 WhatsApp\n(whatsapp-web.js)"]
+    iCloud["☁️ iCloud\n(webcal-Feed)"]
+    Verein["🏀 Vereins-ICS\n(GitHub Pages)"]
+    Eltern["👨‍👩‍👧 Eltern\n(WhatsApp-Gruppen)"]
+    TrainerApp["📲 Trainer-App\n(zukünftig)"]
+
+    Trainer -->|"Konfiguration\nWeb-UI :8099"| Bot
+    iCloud -->|"Training-ICS-Feed\n(webcal/https)"| Bot
+    Verein -->|"Spiele-ICS-Feed\n(https)"| Bot
+    Bot -->|"Polls, Events\nNachrichten"| WA
+    WA -->|"Umfragen\nErgebnisse"| Eltern
+    TrainerApp -->|"REST-API\n/api/teams/..."| Bot
+----
+
+=== 3.2 Technischer Kontext
+
+[source,mermaid]
+----
+graph LR
+    subgraph HAOS["Home Assistant OS (Docker)"]
+        subgraph Container["whatsapp-training-bot Container"]
+            Express["Express.js\n:8099"]
+            Scheduler["node-cron\n08:00 tägl."]
+            WWebJS["whatsapp-web.js\n+ Puppeteer"]
+            SQLite[("SQLite\n/data/bot.db")]
+        end
+        Ingress["HA Ingress\nProxy"]
+    end
+
+    Browser["Browser\n(Trainer)"] -->|"HTTP"| Ingress
+    Ingress -->|"HTTP"| Express
+    Express --- SQLite
+    Scheduler --- SQLite
+    Scheduler -->|"Polls senden"| WWebJS
+    WWebJS -->|"HTTPS/WS"| WAServer["WhatsApp\nServer"]
+----
+
+== 4. Lösungsstrategie
+
+=== 4.1 Architekturentscheidungen
+
+[cols="1,2,2"]
+|===
+|Entscheidung |Gewählte Option |Begründung
+
+|WhatsApp-Client |whatsapp-web.js (Browser-Automation) |Kein Business API nötig, keine Kosten
+|Datenhaltung |SQLite (better-sqlite3) |Kein DB-Server, einfach, ausreichend für die Last
+|Scheduler |node-cron (täglich 08:00) |Einfach, kein Echtzeit-Polling nötig
+|Deployment |Docker / HA Add-on |Läuft 24/7, persistent, keine Cloud
+|Frontend |Vanilla HTML/JS |Kein Framework-Overhead, einfach wartbar
+|===
+
+=== 4.2 Duplicate-Send-Prävention
+
+Jede gesendete Aktion wird in `sent_polls` protokolliert. Vor jedem Senden prüft `alreadySent()`, ob der Eintrag existiert:
+
+[source,sql]
+----
+SELECT id FROM sent_polls
+WHERE team_id = ?
+  AND gruppe_whatsapp_id = ?
+  AND typ = ?          -- 'training' | 'spiel' | 'event'
+  AND ereignis_datum = ?
+----
+
+Damit sind Neustarts und doppelte Cron-Runs sicher.
+
+== 5. Bausteinsicht
+
+=== 5.1 Ebene 1 — Systemübersicht
+
+[source,mermaid]
+----
+graph TB
+    subgraph src["src/"]
+        index["index.js\nApp-Einstiegspunkt"]
+        db["db.js\nDatenbankschicht"]
+        ical["ical.js\nKalender-Parsing"]
+        whatsapp["whatsapp.js\nWhatsApp-Client"]
+        scheduler["scheduler.js\nZeitplanung"]
+        polls["polls.js\nPoll-Erstellung"]
+        events["events.js\nEvent-Erstellung"]
+        csv["csv.js\nCSV-Export"]
+        subgraph api["api/"]
+            teams["teams.js\nTeam-CRUD"]
+            kinder["kinder.js\nKinder-CRUD"]
+            teilnahme["teilnahme.js\nTeilnahme-Export"]
+        end
+    end
+    subgraph public["public/"]
+        html["index.html"]
+        js["app.js"]
+        css["style.css"]
+    end
+
+    index --> db
+    index --> whatsapp
+    index --> scheduler
+    index --> teams
+    index --> kinder
+    index --> teilnahme
+    scheduler --> ical
+    scheduler --> polls
+    scheduler --> events
+    scheduler --> csv
+    polls --> whatsapp
+    events --> whatsapp
+    csv --> whatsapp
+    teams --> db
+    kinder --> db
+    teilnahme --> db
+----
+
+=== 5.2 Wichtige Bausteine
+
+==== db.js — Datenbankschicht
+
+Initialisiert das SQLite-Schema und stellt eine Singleton-Datenbankinstanz bereit.
+
+Exports: `initDb()`, `getDb()`
+
+==== ical.js — Kalender-Parsing
+
+[cols="1,3"]
+|===
+|Funktion |Beschreibung
+
+|`fetchIcs(url)` |Lädt ICS-Feed, normalisiert `webcal://` → `https://`
+|`parseEvents(ics)` |Parst VEVENT-Einträge inkl. RRULE
+|`filterEvents(events, filter)` |Case-insensitive SUMMARY-Textfilter
+|`getUpcomingEvents(events, tage)` |Gibt Events zurück, die in genau N Tagen stattfinden
+|===
+
+==== scheduler.js — Zeitplanung
+
+Läuft täglich um 08:00 via node-cron. Pro Team und Feed:
+
+1. Training-Feed: Poll N Tage vorher an Gruppen mit Rolle `training`
+2. Spiele-Feed: Event 14 Tage vorher (`allgemein`), Poll N Tage vorher (`spiel-orga`), CSV 1 Tag vorher
+
+==== whatsapp.js — WhatsApp-Client
+
+Verwaltet den Puppeteer-gesteuerten WhatsApp-Web-Browser. Session wird via `LocalAuth` in `/data/wwebjs_auth` persistiert.
+
+==== polls.js / events.js / csv.js
+
+Fachlogik für die drei Ausgabe-Typen:
+
+* **polls.js**: Formatiert Datum auf Deutsch, sendet Multi-Select (Training) oder Single-Select (Spiel)
+* **events.js**: Erstellt WhatsApp-Gruppenevent mit Titel, Ort und Zeitangabe
+* **csv.js**: Generiert CSV aus Umfrageergebnissen, filtert "Mein Kind ist nicht in der Liste"
+
+== 6. Laufzeitsicht
+
+=== 6.1 Szenario: Training-Poll senden
+
+[source,mermaid]
+----
+sequenceDiagram
+    participant Cron as node-cron (08:00)
+    participant Sched as scheduler.js
+    participant iCal as ical.js
+    participant DB as SQLite
+    participant Polls as polls.js
+    participant WA as whatsapp.js
+
+    Cron->>Sched: runDailyCheck()
+    Sched->>DB: SELECT * FROM teams
+    loop Pro Team
+        Sched->>iCal: fetchIcs(training_feed_url)
+        iCal-->>Sched: ICS-String
+        Sched->>iCal: parseEvents() + filterEvents()
+        iCal-->>Sched: Events[]
+        loop Pro Event
+            Sched->>Sched: shouldSendInDays(event, tage_vor_training)?
+            alt Ja
+                Sched->>DB: alreadySent(team, gruppe, 'training', datum)?
+                alt Nein
+                    Sched->>Polls: sendTrainingPoll(team, gruppeId, start)
+                    Polls->>WA: sendPoll(gruppeId, frage, optionen, multiSelect=true)
+                    WA-->>Polls: messageId
+                    Polls->>DB: INSERT INTO sent_polls
+                end
+            end
+        end
+    end
+----
+
+=== 6.2 Szenario: CSV-Export am Spieltag
+
+[source,mermaid]
+----
+sequenceDiagram
+    participant Cron as node-cron (08:00)
+    participant Sched as scheduler.js
+    participant CSV as csv.js
+    participant DB as SQLite
+    participant WA as whatsapp.js
+
+    Cron->>Sched: runDailyCheck()
+    Sched->>Sched: shouldSendCsv(event)? (1 Tag vor Spiel)
+    Sched->>CSV: getTeilnehmer(db, teamId, datum)
+    CSV->>DB: JOIN sent_polls + poll_results\nFILTER: option != 'Mein Kind ist nicht in der Liste'
+    DB-->>CSV: Kindernamen[]
+    CSV->>CSV: saveCsv(teilnehmer, datum, teamId)
+    Note over CSV: /data/csv/team-{id}/{datum}.csv
+    CSV->>WA: sendMessage(trainerNummer, Teilnehmerliste)
+----
+
+=== 6.3 Szenario: WhatsApp-Verbindungsaufbau
+
+[source,mermaid]
+----
+sequenceDiagram
+    participant App as index.js
+    participant WA as whatsapp.js
+    participant Puppeteer as Chromium
+    participant WAServer as WhatsApp-Server
+    participant Trainer as Trainer (Web-UI)
+
+    App->>WA: initWhatsApp()
+    WA->>Puppeteer: client.initialize()
+    Puppeteer->>WAServer: HTTPS/WebSocket
+    WAServer-->>Puppeteer: QR-Code
+    Puppeteer-->>WA: 'qr' Event
+    WA->>WA: status = 'waiting_for_qr'
+    Trainer->>App: GET /api/whatsapp/status
+    App-->>Trainer: { status, qr }
+    Note over Trainer: QR-Code im Browser anzeigen
+    Trainer->>Trainer: Mit WhatsApp scannen
+    WAServer-->>Puppeteer: Authenticated
+    Puppeteer-->>WA: 'ready' Event
+    WA->>WA: status = 'connected'
+    Note over WA: Session in /data/wwebjs_auth gespeichert
+----
+
+== 7. Verteilungssicht
+
+=== 7.1 Deployment-Diagramm
+
+[source,mermaid]
+----
+graph TB
+    subgraph HomeAssistant["Home Assistant OS (Raspberry Pi / NUC / VM)"]
+        subgraph Supervisor["HA Supervisor"]
+            subgraph Addon["Add-on: whatsapp-training-bot"]
+                subgraph Docker["Docker Container (node:20-slim + Chromium)"]
+                    NodeApp["Node.js App\n:8099"]
+                    Chromium["Chromium\n(Puppeteer)"]
+                end
+                Volume["/data Volume\n- bot.db\n- wwebjs_auth/\n- csv/"]
+            end
+        end
+        Ingress["HA Ingress\n(Reverse Proxy)"]
+    end
+
+    Browser["Browser\n(Trainer)"] -->|"http://homeassistant.local/\nhassio/ingress/..."| Ingress
+    Ingress -->|"HTTP :8099"| NodeApp
+    NodeApp --- Volume
+    Chromium --- Volume
+    Chromium -->|"HTTPS/WS"| Internet["WhatsApp-Server\n(Internet)"]
+    NodeApp -->|"ICS-Feeds\n(HTTPS)"| Internet
+----
+
+=== 7.2 Datei-Layout im Container
+
+[source]
+----
+/
+├── app/
+│   ├── src/
+│   │   ├── index.js
+│   │   ├── db.js
+│   │   ├── ical.js
+│   │   ├── whatsapp.js
+│   │   ├── scheduler.js
+│   │   ├── polls.js
+│   │   ├── events.js
+│   │   ├── csv.js
+│   │   └── api/
+│   │       ├── teams.js
+│   │       ├── kinder.js
+│   │       └── teilnahme.js
+│   ├── public/
+│   │   ├── index.html
+│   │   ├── app.js
+│   │   └── style.css
+│   └── package.json
+└── data/                    ← HA Volume-Mount (persistiert)
+    ├── bot.db
+    ├── wwebjs_auth/
+    └── csv/
+        └── team-{id}/
+            └── {datum}.csv
+----
+
+== 8. Querschnittliche Konzepte
+
+=== 8.1 Datenbankschema
+
+[source,mermaid]
+----
+erDiagram
+    teams {
+        int id PK
+        text name
+        text training_feed_url
+        text training_feed_filter
+        text spiele_feed_url
+        text spiele_feed_filter
+        int tage_vor_training
+        int tage_vor_spiel_poll
+        int tage_vor_spiel_event
+        text csv_uhrzeit
+        text trainer_nummer
+    }
+
+    gruppen {
+        int id PK
+        int team_id FK
+        text whatsapp_id
+        text name
+        text rollen
+    }
+
+    kinder {
+        int id PK
+        int team_id FK
+        text name
+    }
+
+    sent_polls {
+        int id PK
+        int team_id FK
+        text gruppe_whatsapp_id
+        text typ
+        text ereignis_datum
+        text whatsapp_message_id
+        text gesendet_am
+    }
+
+    poll_results {
+        int id PK
+        int sent_poll_id FK
+        text option_name
+        text voter_name
+        text voter_id
+        text erfasst_am
+    }
+
+    teams ||--o{ gruppen : "hat"
+    teams ||--o{ kinder : "hat"
+    teams ||--o{ sent_polls : "hat"
+    sent_polls ||--o{ poll_results : "hat"
+----
+
+=== 8.2 Fehlerbehandlung
+
+[cols="1,2,2"]
+|===
+|Fehlerfall |Behandlung |Konsequenz
+
+|ICS-Feed nicht erreichbar |`try/catch` im Scheduler, `console.error` |Nächster Cron-Lauf versucht es erneut
+|WhatsApp nicht verbunden |HTTP 503 von `/api/whatsapp/gruppen` |Web-UI zeigt Status, kein Poll-Absturz
+|Poll bereits gesendet |`alreadySent()` bricht ab |Kein doppelter Versand
+|Ungültige Team-ID |HTTP 404 in API-Routen |Klare Fehlermeldung
+|===
+
+=== 8.3 Sicherheit
+
+* WhatsApp-Session liegt im lokalen `/data`-Volume (kein Cloud-Upload)
+* Web-UI nur über HA Ingress erreichbar (kein direkter Internetzugang)
+* Keine Passwörter gespeichert — Authentifizierung via QR-Code
+
+=== 8.4 ICS-Feed-Verarbeitung
+
+[source,mermaid]
+----
+flowchart LR
+    URL["ICS-URL\n(webcal:// oder https://)"]
+    Norm["webcal:// →\nhttps://"]
+    Fetch["HTTP(S) GET"]
+    Parse["node-ical\nparseICS()"]
+    Filter["SUMMARY-Filter\n(case-insensitive)"]
+    Events["Events[]\n{summary, start, end, location}"]
+
+    URL --> Norm --> Fetch --> Parse --> Filter --> Events
+----
+
+== 9. Architekturentscheidungen
+
+=== ADR-001: whatsapp-web.js statt WhatsApp Business API
+
+*Status:* Akzeptiert
+
+*Kontext:* Für automatische WhatsApp-Nachrichten gibt es zwei Wege: die offizielle Business API (kostenpflichtig, erfordert verifiziertes Business-Konto) oder Browser-Automation via whatsapp-web.js.
+
+*Entscheidung:* whatsapp-web.js mit Puppeteer.
+
+*Konsequenzen:*
+* (+) Kostenlos, keine monatlichen Gebühren
+* (+) Unterstützt native WhatsApp-Polls und Group-Events
+* (-) Inoffizielle API, WhatsApp könnte Änderungen vornehmen
+* (-) Benötigt Chromium im Container (~300 MB)
+
+=== ADR-002: SQLite statt PostgreSQL/MySQL
+
+*Status:* Akzeptiert
+
+*Kontext:* Die Last ist minimal (ein Schreibvorgang pro Tag pro Team), aber Persistenz über Neustarts ist kritisch.
+
+*Entscheidung:* SQLite via better-sqlite3.
+
+*Konsequenzen:*
+* (+) Kein eigener DB-Server, einfaches Setup
+* (+) Single-File-Datenbank leicht zu sichern
+* (-) Kein Multi-Process-Zugriff (nicht relevant hier)
+
+=== ADR-003: Täglicher Cron statt Event-getriebenem Scheduler
+
+*Status:* Akzeptiert
+
+*Kontext:* Polls müssen X Tage vor einem Termin versendet werden.
+
+*Entscheidung:* node-cron läuft täglich um 08:00 und prüft alle Teams.
+
+*Konsequenzen:*
+* (+) Einfach, keine komplexe Event-Queue
+* (+) `alreadySent()` verhindert doppelten Versand bei Mehrfachläufen
+* (-) Max. 24h Verzögerung bei Konfigurationsänderungen (akzeptabel)
+
+== 10. Qualitätsanforderungen
+
+=== 10.1 Qualitätsszenarien
+
+[cols="1,2,3,2"]
+|===
+|ID |Szenario |Reaktion des Systems |Messgröße
+
+|Q1 |HA wird neu gestartet |WhatsApp-Session bleibt erhalten, kein QR-Scan nötig |0 manuelle Eingriffe
+|Q2 |Cron läuft zweimal (z.B. nach Absturz) |Poll wird nur einmal gesendet |0 Duplikate
+|Q3 |ICS-Feed ist kurzzeitig offline |Fehlermeldung im Log, nächster Lauf versucht erneut |Kein Absturz
+|Q4 |Neues Kind kommt ins Team |In Web-UI hinzufügen, erscheint im nächsten Spiel-Poll |< 1 Minute Aufwand
+|===
+
+== 11. Risiken und technische Schulden
+
+[cols="1,2,2,1"]
+|===
+|ID |Risiko |Maßnahme |Priorität
+
+|R1 |WhatsApp blockiert Browser-Automation |Monitoring, community fork falls nötig |Mittel
+|R2 |Chromium-Updates brechen Puppeteer |Pinned Chromium-Version im Dockerfile |Niedrig
+|R3 |Poll-Results-API fehlt in whatsapp-web.js |Aktuell keine automatische Auswertung |Niedrig (akzeptiert)
+|R4 |Kein HTTPS auf Web-UI |Nur über HA-Ingress erreichbar (lokales Netz) |Niedrig
+|===
+
+== 12. Glossar
+
+[cols="1,3"]
+|===
+|Begriff |Bedeutung
+
+|ICS / iCal |Standard-Kalenderformat (RFC 5545)
+|webcal:// |URL-Schema für Kalender-Abonnements (entspricht https://)
+|RRULE |Wiederholungsregel in ICS (z.B. wöchentliches Training)
+|VEVENT |Kalender-Eintrags-Typ im ICS-Format
+|HA Add-on |Docker-Container, der in Home Assistant als Erweiterung läuft
+|HA Ingress |Reverse-Proxy von Home Assistant für Add-on-Web-UIs
+|LocalAuth |whatsapp-web.js Authentifizierungs-Strategie (Session lokal gespeichert)
+|Spiel-Orga |WhatsApp-Gruppen-Rolle für Spielplanung (enthält Kinder-Poll)
+|Training-Rolle |WhatsApp-Gruppen-Rolle für Training-Poll-Empfang
+|Allgemein-Rolle |WhatsApp-Gruppen-Rolle für Spielankündigungs-Events
+|sent_polls |Deduplizierungs-Tabelle, verhindert doppelten Versand
+|poll_results |Gespeicherte Umfrageergebnisse für CSV-Export
+|===
+
+---
+
+_Dokumentiert mit link:https://arc42.org[arc42] v8._
+
+link:https://www.buymeacoffee.com/olivermarcus.eder[☕ Buy me a coffee]
