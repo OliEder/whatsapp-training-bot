@@ -1,0 +1,19 @@
+name: WhatsApp Training-Bot
+version: "1.0.0"
+slug: whatsapp_training_bot
+description: Automatische WhatsApp-Polls für Trainings und Spiele
+url: https://github.com/OliEder/whatsapp-training-bot
+arch:
+  - aarch64
+  - amd64
+  - armhf
+  - armv7
+startup: application
+boot: auto
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:basketball
+map:
+  - data:rw
+options: {}
+schema: {}
